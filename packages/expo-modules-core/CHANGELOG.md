@@ -9,6 +9,7 @@
 ### 🐛 Bug fixes
 
 - [Android] Throw a JavaScript error instead of aborting when returning a shared object whose JavaScript instance is no longer available. ([#50667](https://github.com/expo/expo/pull/50667) by [@lukmccall](https://github.com/lukmccall))
+- Native views inside a native layout host, such as an `@expo/ui` `Host`, no longer get a Yoga box of their own. ([#50694](https://github.com/expo/expo/issues/50694) by [@swood09](https://github.com/swood09), [#50715](https://github.com/expo/expo/pull/50715) by [@intergalacticspacehighway](https://github.com/intergalacticspacehighway))
 
 ### 💡 Others
 

@@ -1,4 +1,4 @@
-import { BottomSheet, Host, HStack, RNHostView, VStack } from '@expo/ui/swift-ui';
+import { BottomSheet, DisclosureGroup, Host, HStack, RNHostView, VStack } from '@expo/ui/swift-ui';
 import { padding } from '@expo/ui/swift-ui/modifiers';
 import React from 'react';
 import { ScrollView, View } from 'react-native';
@@ -66,6 +66,70 @@ async function measureWhenPresented(
   throw new Error(`Timed out waiting for ${label} to be presented and laid out`);
 }
 
+/**
+ * Measures until the result stops changing. SwiftUI publishes where it drew a hosted view after it
+ * lays it out, so a single measure right after a state change can read the previous frame.
+ */
+async function measureSettled(
+  ref: React.RefObject<ViewRef | null>,
+  label: string,
+  timeoutMs = 3000
+): Promise<Measurement> {
+  const started = Date.now();
+  let last = await measureAsync(ref, label);
+  let stableReads = 0;
+  while (Date.now() - started < timeoutMs) {
+    await delay(100);
+    const next = await measureAsync(ref, label);
+    stableReads = next.pageX === last.pageX && next.pageY === last.pageY ? stableReads + 1 : 0;
+    last = next;
+    if (stableReads >= 3) {
+      return last;
+    }
+  }
+  return last;
+}
+
+type DisclosureControls = {
+  setExpanded: (expanded: boolean) => void;
+  setTestID: (testID: string) => void;
+  setMounted: (mounted: boolean) => void;
+};
+
+// SwiftUI removes a collapsed group's content, so the hosted view disappears while it stays mounted.
+function DisclosureProbe({
+  controls,
+  hostWrapperRef,
+  hostedRef,
+}: {
+  controls: { current: DisclosureControls | null };
+  hostWrapperRef: React.RefObject<ViewRef | null>;
+  hostedRef: React.RefObject<ViewRef | null>;
+}) {
+  const [expanded, setExpanded] = React.useState(true);
+  const [testID, setTestID] = React.useState('first');
+  const [mounted, setMounted] = React.useState(true);
+  controls.current = { setExpanded, setTestID, setMounted };
+
+  return (
+    <View ref={hostWrapperRef} collapsable={false}>
+      <Host matchContents>
+        <VStack modifiers={[padding({ all: PADDING })]}>
+          <DisclosureGroup label="Section" isExpanded={expanded} onIsExpandedChange={setExpanded}>
+            {mounted ? (
+              // `testID` is not in the typed props; RNHostView forwards it, which updates the
+              // native view without moving it.
+              <RNHostView matchContents {...({ testID } as object)}>
+                <View ref={hostedRef} style={{ width: BOX, height: BOX }} />
+              </RNHostView>
+            ) : null}
+          </DisclosureGroup>
+        </VStack>
+      </Host>
+    </View>
+  );
+}
+
 export async function test(
   { it, describe, expect, afterEach }: any,
   { setPortalChild, cleanupPortal }: any
@@ -128,6 +192,47 @@ export async function test(
               <RNHostView matchContents>
                 <View ref={secondRef} style={{ width: BOX, height: BOX }} />
               </RNHostView>
+            </VStack>
+          </Host>
+        </View>
+      );
+
+      await laidOut;
+
+      const host = await measureAsync(hostWrapperRef);
+      const first = await measureAsync(firstRef);
+      const second = await measureAsync(secondRef);
+
+      expect(first.pageX - host.pageX).toBe(PADDING);
+      expect(first.pageY - host.pageY).toBe(PADDING);
+      expect(second.pageX - host.pageX).toBe(PADDING + (WIDE - BOX) / 2);
+      expect(second.pageY - host.pageY).toBe(host.height - PADDING - BOX);
+    });
+
+    it('measures a hosted view inside a stack that is not the first child', async () => {
+      const hostWrapperRef = React.createRef<ViewRef>();
+      const firstRef = React.createRef<ViewRef>();
+      const secondRef = React.createRef<ViewRef>();
+
+      let onLaidOut: () => void;
+      const laidOut = new Promise<void>((resolve) => {
+        onLaidOut = resolve;
+      });
+
+      setPortalChild(
+        <View ref={hostWrapperRef} collapsable={false}>
+          <Host matchContents onLayoutContent={() => onLaidOut()}>
+            <VStack modifiers={[padding({ all: PADDING })]}>
+              <VStack>
+                <RNHostView matchContents>
+                  <View ref={firstRef} style={{ width: WIDE, height: SHORT }} />
+                </RNHostView>
+              </VStack>
+              <VStack>
+                <RNHostView matchContents>
+                  <View ref={secondRef} style={{ width: BOX, height: BOX }} />
+                </RNHostView>
+              </VStack>
             </VStack>
           </Host>
         </View>
@@ -296,6 +401,68 @@ export async function test(
       // while the differences above stay right, because those two views scroll together.
       expect(hostedAfter.pageX - viewport.pageX).toBe(PADDING);
       expect(hostedAfter.pageY - viewport.pageY).toBe(SCROLL_LEAD + PADDING - SCROLL_BY);
+    });
+
+    it('measures a hosted view again after it disappears and is updated while hidden', async () => {
+      const controls: { current: DisclosureControls | null } = { current: null };
+      const hostWrapperRef = React.createRef<ViewRef>();
+      const hostedRef = React.createRef<ViewRef>();
+
+      setPortalChild(
+        <DisclosureProbe
+          controls={controls}
+          hostWrapperRef={hostWrapperRef}
+          hostedRef={hostedRef}
+        />
+      );
+
+      await measureWhenPresented(hostedRef, 'the hosted box');
+      const host = await measureSettled(hostWrapperRef, 'the Host wrapper');
+      const before = await measureSettled(hostedRef, 'the hosted box');
+      // Below the group's label, inside the stack's padding.
+      expect(before.pageX - host.pageX).toBeGreaterThanOrEqual(PADDING);
+      expect(before.pageY - host.pageY).toBeGreaterThan(PADDING);
+
+      controls.current?.setExpanded(false);
+      await delay(500);
+      // An update while hidden, with no change in where the view is drawn.
+      controls.current?.setTestID('second');
+      await delay(500);
+      controls.current?.setExpanded(true);
+      await delay(500);
+
+      const hostAfter = await measureSettled(hostWrapperRef, 'the Host wrapper');
+      const after = await measureSettled(hostedRef, 'the hosted box');
+      expect(after.pageX - hostAfter.pageX).toBe(before.pageX - host.pageX);
+      expect(after.pageY - hostAfter.pageY).toBe(before.pageY - host.pageY);
+    });
+
+    it('measures a hosted view again after it is unmounted and mounted', async () => {
+      const controls: { current: DisclosureControls | null } = { current: null };
+      const hostWrapperRef = React.createRef<ViewRef>();
+      const hostedRef = React.createRef<ViewRef>();
+
+      setPortalChild(
+        <DisclosureProbe
+          controls={controls}
+          hostWrapperRef={hostWrapperRef}
+          hostedRef={hostedRef}
+        />
+      );
+
+      await measureWhenPresented(hostedRef, 'the hosted box');
+      const host = await measureSettled(hostWrapperRef, 'the Host wrapper');
+      const before = await measureSettled(hostedRef, 'the hosted box');
+
+      controls.current?.setMounted(false);
+      await delay(500);
+      controls.current?.setMounted(true);
+      await measureWhenPresented(hostedRef, 'the remounted hosted box');
+
+      const hostAfter = await measureSettled(hostWrapperRef, 'the Host wrapper');
+      const after = await measureSettled(hostedRef, 'the hosted box');
+      expect(after.pageX - hostAfter.pageX).toBe(before.pageX - host.pageX);
+      expect(after.pageY - hostAfter.pageY).toBe(before.pageY - host.pageY);
     });
 
     // A sheet content uses RootNodeKind trait so measurement happens relative to the RNHostView and not the RN's root surface.
