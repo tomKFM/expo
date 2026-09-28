@@ -9,6 +9,7 @@
 ### 🐛 Bug fixes
 
 - [Android] Throw a JavaScript error instead of aborting when returning a shared object whose JavaScript instance is no longer available. ([#50667](https://github.com/expo/expo/pull/50667) by [@lukmccall](https://github.com/lukmccall))
+- [iOS] Fixed a crash (`The app context has been lost`) when an Expo view mounts during a reload. ([#50721](https://github.com/expo/expo/pull/50721) by [@tsapeta](https://github.com/tsapeta))
 
 ### 💡 Others
 
